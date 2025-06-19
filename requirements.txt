@@ -1,3 +1,0 @@
-django-restframework
-django-crispy-forms
-django-widget-tweaks
