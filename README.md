@@ -61,7 +61,7 @@ Splitwise is a Django-based web application designed to simplify the process of 
    python manage.py runserver
    ```
 
- 5. Visit [http://localhost:8000/](http://localhost:8000/) in your web browser.
+ 5. Visit [[http://127.0.0.1:8000/api/dashboard/](http://127.0.0.1:8000/api/dashboard/) in your web browser.
 
 ### Configuration
 
