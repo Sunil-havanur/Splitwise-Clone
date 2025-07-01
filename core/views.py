@@ -1,14 +1,15 @@
 from django.shortcuts import render, redirect, get_object_or_404
-from collections import defaultdict
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.decorators import api_view
 from rest_framework import generics, status
-from .models import Group, Expense, Split, User
+from core.models import Group, Expense, Split, User, GroupMember
 from .serializers import GroupSerializer, ExpenseCreateSerializer
 from django.db.models import Sum
 from .forms import GroupForm, ExpenseForm
 from decimal import Decimal
+from .utils import calculate_group_balances
+
 
 @api_view(['GET'])
 def api_overview(request):
@@ -19,6 +20,7 @@ class GroupCreateView(generics.CreateAPIView):
     queryset = Group.objects.all()
     serializer_class = GroupSerializer
 
+
 @api_view(['POST'])
 def create_group_api(request):
     serializer = GroupSerializer(data=request.data)
@@ -27,39 +29,18 @@ def create_group_api(request):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+
 class ExpenseCreateView(generics.CreateAPIView):
     queryset = Expense.objects.all()
     serializer_class = ExpenseCreateSerializer
 
+
 class GroupBalanceView(APIView):
     def get(self, request, group_id):
-        try:
-            group = Group.objects.get(id=group_id)
-        except Group.DoesNotExist:
-            return Response({"error": "Group not found"}, status=404)
-
-        users = group.members.all()
-        balances = {}
-
-        for user in users:
-            paid = Expense.objects.filter(group=group, paid_by=user).aggregate(total=Sum('amount'))['total'] or 0
-            owed = Split.objects.filter(expense__group=group, user=user).aggregate(total=Sum('amount'))['total'] or 0
-            balances[user.username] = round(paid - owed, 2)
-
-        # Format as 'X owes Y ₹Z'
-        transactions = []
-        usernames = list(balances.keys())
-        amounts = list(balances.values())
-
-        for i in range(len(usernames)):
-            for j in range(len(usernames)):
-                if amounts[i] < 0 and amounts[j] > 0:
-                    amount_to_pay = min(abs(amounts[i]), amounts[j])
-                    transactions.append(f"{usernames[i]} owes {usernames[j]} ₹{amount_to_pay:.2f}")
-                    amounts[i] += amount_to_pay
-                    amounts[j] -= amount_to_pay
-
-        return Response({"balances": transactions})
+        result = calculate_group_balances(group_id)
+        if "error" in result:
+            return Response(result, status=404)
+        return Response(result)
 
 
 class UserBalanceView(APIView):
@@ -80,6 +61,8 @@ class UserBalanceView(APIView):
             "net_balance": round(total_paid - total_owed, 2)
         })
 
+
+@api_view(['GET', 'POST'])
 def create_group_view(request):
     if request.method == 'POST':
         form = GroupForm(request.POST)
@@ -89,6 +72,7 @@ def create_group_view(request):
     else:
         form = GroupForm()
     return render(request, 'create_group.html', {'form': form})
+
 
 def add_expense(request):
     if request.method == "POST":
@@ -120,51 +104,23 @@ def add_expense(request):
             return redirect('add-expense')
     else:
         form = ExpenseForm()
-    
+
     return render(request, 'add_expense.html', {'form': form})
 
+
+@api_view(['GET'])
 def group_balances_page(request, group_id):
-    group = get_object_or_404(Group, id=group_id)
-    expenses = group.expense_set.all()
+    result = calculate_group_balances(group_id)
+    if "error" in result:
+        return render(request, 'group_balances.html', {'balances': ["Group not found"]})
+    return render(request, 'group_balances.html', {'balances': result.get('balances', [])})
 
-    # Track how much each user paid and owes
-    paid = defaultdict(float)
-    owed = defaultdict(float)
-
-    for expense in expenses:
-        paid[expense.paid_by.username] += float(expense.amount)
-        for split in expense.splits.all():
-            owed[split.user.username] += float(split.amount)
-
-    balances = []
-    for user in group.members.all():
-        username = user.username
-        net = paid[username] - owed[username]
-        if net < 0:
-            balances.append(f"{username} owes ₹{abs(net):.2f}")
-        elif net > 0:
-            balances.append(f"{username} is owed ₹{net:.2f}")
-        else:
-            balances.append(f"{username} is settled up")
-
-    return render(request, 'group_balances.html', {'balances': balances})
 
 def user_summary_page(request, user_id):
     user = get_object_or_404(User, id=user_id)
 
-    total_paid = 0
-    total_owed = 0
-
-    # Get all expenses where this user paid
-    paid_expenses = Expense.objects.filter(paid_by=user)
-    for expense in paid_expenses:
-        total_paid += float(expense.amount)
-
-    # Get all splits where this user owes money
-    owed_splits = Split.objects.filter(user=user)
-    for split in owed_splits:
-        total_owed += float(split.amount)
-
+    total_paid = Expense.objects.filter(paid_by=user).aggregate(total=Sum('amount'))['total'] or 0
+    total_owed = Split.objects.filter(user=user).aggregate(total=Sum('amount'))['total'] or 0
     net_balance = total_paid - total_owed
 
     summary = {
@@ -175,6 +131,7 @@ def user_summary_page(request, user_id):
     }
 
     return render(request, 'user_summary.html', {'summary': summary})
+
 
 def dashboard(request):
     context = {
